@@ -15,9 +15,9 @@ import {
   YAxis,
   ZAxis,
 } from 'recharts'
-import { api, type Accuracy, type Compare, type Horizon, type Meta, type Settings } from '../api'
+import { api, type Accuracy, type Compare, type Horizon, type Insight, type Meta, type Settings } from '../api'
 import { TooltipBox } from '../components/ChartTooltip'
-import { fmtAxisGW, fmtDayShort, fmtHours, fmtMW, fmtPct } from '../format'
+import { fmtAxisGW, fmtDayShort, fmtGW, fmtHours, fmtMW, fmtPct } from '../format'
 import { useApi } from '../useApi'
 
 interface Props {
@@ -38,6 +38,7 @@ export function AccuracyView({ meta, settings: s }: Props) {
   const acc = useApi(() => api.accuracy(s), [s.auction, s.prep, s.confidence, s.adjust])
   const cmp = useApi(() => api.compare(s), [s.prep, s.confidence])
   const hor = useApi(api.horizon, [])
+  const ins = useApi(() => api.insight(s), [s.auction, s.prep])
 
   if (acc.state.status === 'error') return <p className="state error">{acc.state.error}</p>
   if (!acc.data) return <p className="state">Loading accuracy analysis…</p>
@@ -55,7 +56,7 @@ export function AccuracyView({ meta, settings: s }: Props) {
         </h1>
         <p>
           Every hour of every January delivery day, scored against the forecast available before the {auction.name} closed at{' '}
-          {auction.gate_closure}. {a.adjusted ? 'Forecasts are corrected for the bias seen over the previous week.' : 'Forecasts are the official Elexon figures, uncorrected.'}
+          {auction.gate_closure}. {a.adjusted ? 'Pilot insight is on: forecasts are rescaled with a line fitted on the previous two weeks.' : 'Forecasts are the official Elexon figures.'}
         </p>
       </div>
 
@@ -73,6 +74,8 @@ export function AccuracyView({ meta, settings: s }: Props) {
       </div>
 
       {cmp.data && <CompareTable data={cmp.data} current={s} />}
+
+      {ins.data && <InsightPanel data={ins.data} />}
 
       <div className="grid2">
         <section className="panel">
@@ -115,8 +118,8 @@ export function AccuracyView({ meta, settings: s }: Props) {
               weeks with known outturn. If it is well calibrated, actual wind should reach it in about {pct}% of hours.
             </p>
             <p>
-              The official forecast predicts output before curtailment, so it tends to run above metered generation on windy
-              days. Bias correction removes most of that gap.
+              The official forecast tends to run above metered generation, most of all on windy days, which fits wind farms
+              being curtailed when the grid cannot take their output. The pilot insight below measures this.
             </p>
           </div>
         </section>
@@ -128,7 +131,8 @@ export function AccuracyView({ meta, settings: s }: Props) {
           <li>Purchase decisions made from 1 to 31 January 2026, covering delivery days 2 January to 1 February.</li>
           <li>Decision time is the auction's gate closure on the day before delivery minus the preparation time you set. The forecast used is the latest WINDFOR run published at or before that time.</li>
           <li>WINDFOR forecasts are hourly; each is compared with the FUELHH wind outturn for the half hour starting at the same time.</li>
-          <li>Bias correction and the reliable band use only delivery days up to two days before the target day, since the day before is still in progress at decision time. Two weeks of December history are included so early January days have a track record.</li>
+          <li>The reliable band and the pilot's corrected forecast use only delivery days up to two days before the target day, since the day before is still in progress at decision time. Two weeks of December history are included so early January days have a track record.</li>
+          <li>The corrected forecast fits actual = a + b × forecast on the previous 14 days for each delivery day. The method and window were chosen on 2 to 16 January and are scored separately on 17 January to 1 February. A band that widens with wind level was also tried and dropped: on the unseen days it was no better than the simpler band.</li>
           <li>Horizon analysis uses every published forecast run, not just the one used for decisions.</li>
           <li>Gate closures: EPEX 60-minute 09:20, N2EX hourly 09:50, EPEX 30-minute 15:30 (UK time).</li>
         </ul>
@@ -175,7 +179,7 @@ function CompareTable({ data, current }: { data: Compare; current: Settings }) {
               <tr key={`${r.auction}-${r.adjusted}`} className={r.auction === current.auction && r.adjusted === current.adjust ? 'current' : undefined}>
                 <td>{r.name}</td>
                 <td>{r.gate_closure}</td>
-                <td>{r.adjusted ? 'Bias-corrected' : 'Official'}</td>
+                <td>{r.adjusted ? 'Corrected (pilot)' : 'Official'}</td>
                 <td>{r.horizon_h ? `${fmtHours(r.horizon_h.min)} to ${fmtHours(r.horizon_h.max)}` : '–'}</td>
                 <td>{r.metrics.mae === best ? <span className="best">{fmtMW(r.metrics.mae)}</span> : fmtMW(r.metrics.mae)}</td>
                 <td>{fmtMW(r.metrics.bias, true)}</td>
@@ -185,6 +189,78 @@ function CompareTable({ data, current }: { data: Compare; current: Settings }) {
             ))}
           </tbody>
         </table>
+      </div>
+    </section>
+  )
+}
+
+function InsightPanel({ data }: { data: Insight }) {
+  const levels = data.by_level.map((b) => ({ ...b, label: `${b.from / 1000}–${b.to / 1000}` }))
+  const range = (r: [string, string]) => `${fmtDayShort(`${r[0]}T12:00:00Z`)} to ${fmtDayShort(`${r[1]}T12:00:00Z`)}`
+  const gain = (h: 'selection' | 'test') => {
+    const o = data.official[h].mae, c = data.corrected[h].mae
+    return o && c ? fmtPct((100 * (o - c)) / o) : '–'
+  }
+  return (
+    <section className="panel insight">
+      <h2>Pilot insight: the forecast overshoots most on windy days</h2>
+      <p className="sub">
+        This goes beyond the two questions in scope. It uses only the same Elexon data, and only what was known at each
+        decision.
+      </p>
+      <div className="two-col">
+        <div>
+          <ResponsiveContainer width="100%" height={250}>
+            <ComposedChart data={levels} margin={{ top: 12, right: 8, bottom: 14, left: 0 }}>
+              <CartesianGrid stroke="var(--line-soft)" vertical={false} />
+              <XAxis dataKey="label" interval={0} {...AXIS} label={{ value: 'Official forecast for the hour (GW)', position: 'insideBottom', offset: -8, fontSize: 12, fill: 'var(--muted)' }} />
+              <YAxis tickFormatter={fmtAxisGW} width={52} {...AXIS} />
+              <Tooltip
+                content={({ active, payload }) => {
+                  if (!active || !payload?.length) return null
+                  const r = payload[0].payload as (typeof levels)[number]
+                  return (
+                    <TooltipBox
+                      title={`Forecast ${r.label} GW`}
+                      rows={[
+                        { label: 'Average overshoot', value: fmtMW(r.bias, true), color: 'var(--signal)' },
+                        { label: 'Average error', value: fmtMW(r.mae) },
+                        { label: 'Hours', value: String(r.n) },
+                      ]}
+                    />
+                  )
+                }}
+              />
+              <Bar dataKey="bias" fill="var(--signal)" fillOpacity={0.75} isAnimationActive={false} />
+            </ComposedChart>
+          </ResponsiveContainer>
+          <p className="sub">Average amount the official forecast was above actual generation, by forecast level.</p>
+        </div>
+        <div className="facts">
+          <p>
+            When more than 20 GW is forecast, actual output comes in about <strong>{fmtGW(levels.at(-1)?.bias)}</strong> lower.
+            Below 5 GW the gap is only <strong>{fmtGW(levels[0]?.bias)}</strong>. This fits wind farms being curtailed when the
+            grid cannot take their output.
+          </p>
+          <p>
+            Rescaling each day's forecast with a line fitted on the previous {data.window_days} days (typically actual ≈{' '}
+            {fmtGW(data.typical_fit.intercept_mw)} + {data.typical_fit.slope.toFixed(2)} × forecast) cuts the average error:
+          </p>
+          <table className="compare">
+            <thead>
+              <tr>
+                <th>Average error</th>
+                <th>{range(data.split.selection)}<br />method chosen</th>
+                <th>{range(data.split.test)}<br />unseen days</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Official forecast</td><td>{fmtMW(data.official.selection.mae)}</td><td>{fmtMW(data.official.test.mae)}</td></tr>
+              <tr><td>Corrected (pilot)</td><td>{fmtMW(data.corrected.selection.mae)}</td><td>{fmtMW(data.corrected.test.mae)}</td></tr>
+              <tr><td>Reduction</td><td>{gain('selection')}</td><td><span className="best">{gain('test')}</span></td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   )

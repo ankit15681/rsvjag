@@ -23,10 +23,18 @@ def test_day_view_uses_forecast_published_before_decision():
     assert all(v["available_at_decision"] == (v["publish_time"] <= body["decision_time"]) for v in body["vintages"])
 
 
-def test_raw_view_has_no_correction():
-    body = client.get("/api/day", params={"date": "2026-01-15", "adjust": "false"}).json()
-    assert body["correction_mw"] == 0
+def test_official_forecast_is_the_default():
+    body = client.get("/api/day", params={"date": "2026-01-15"}).json()
+    assert body["adjusted"] is False
+    assert body["correction"] == {"mean_mw": 0, "slope": 1, "intercept_mw": 0}
     assert all(p["forecast"] == p["raw_forecast"] for p in body["series"])
+    assert client.get("/api/accuracy").json()["adjusted"] is False
+
+
+def test_corrected_view_keeps_the_official_forecast_alongside():
+    body = client.get("/api/day", params={"date": "2026-01-15", "adjust": "true"}).json()
+    assert body["adjusted"] is True
+    assert any(p["forecast"] != p["raw_forecast"] for p in body["series"])
 
 
 @pytest.mark.parametrize("params", [{"date": "2025-12-01"}, {"date": "2026-03-01"}])
@@ -54,3 +62,12 @@ def test_horizon_profile_is_bucketed():
     stats = client.get("/api/horizon", params={"bucket": 6}).json()["stats"]
     assert stats[0]["horizon_from"] == 0
     assert all(s["horizon_to"] - s["horizon_from"] == 6 for s in stats)
+
+
+def test_insight_reports_selection_and_unseen_test_days_separately():
+    body = client.get("/api/insight").json()
+    assert body["split"]["test"][0] == "2026-01-17"
+    for kind in ("official", "corrected"):
+        halves = body[kind]
+        assert halves["selection"]["n"] + halves["test"]["n"] == halves["all"]["n"] == 31 * 24
+    assert sum(b["n"] for b in body["by_level"]) == 31 * 24

@@ -58,7 +58,7 @@ export interface DayView {
   decision_time: string
   forecast_publish_time: string
   horizon_h: Range
-  correction_mw: number
+  correction: { mean_mw: number; slope: number; intercept_mw: number }
   buffer_mw: number | null
   series: {
     t: string
@@ -123,6 +123,16 @@ export interface Compare {
   }[]
 }
 
+export interface Insight {
+  auction: string
+  window_days: number
+  split: { selection: [string, string]; test: [string, string] }
+  by_level: (GroupStats & { from: number; to: number })[]
+  official: { all: Metrics; selection: Metrics; test: Metrics }
+  corrected: { all: Metrics; selection: Metrics; test: Metrics }
+  typical_fit: { slope: number; intercept_mw: number }
+}
+
 export interface Settings {
   auction: string
   prep: number
@@ -148,4 +158,5 @@ export const api = {
   accuracy: (s: Settings) => get<Accuracy>('accuracy', { ...s }),
   horizon: () => get<Horizon>('horizon', { bucket: 3 }),
   compare: (s: Pick<Settings, 'prep' | 'confidence'>) => get<Compare>('compare', s),
+  insight: (s: Pick<Settings, 'auction' | 'prep'>) => get<Insight>('insight', { auction: s.auction, prep: s.prep }),
 }

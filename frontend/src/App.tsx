@@ -14,7 +14,7 @@ function readHash(): Tab {
 export default function App() {
   const meta = useApi(api.meta, [])
   const [tab, setTab] = useState<Tab>(readHash)
-  const [settings, setSettings] = useState<Settings>({ auction: 'epex-60', prep: 30, confidence: 0.9, adjust: true })
+  const [settings, setSettings] = useState<Settings>({ auction: 'epex-60', prep: 30, confidence: 0.9, adjust: false })
 
   useEffect(() => {
     const onHash = () => setTab(readHash())

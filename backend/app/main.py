@@ -1,6 +1,6 @@
 """HTTP API for the wind forecast decision-support app."""
 
-from datetime import date
+from datetime import date, timedelta
 from functools import lru_cache
 from typing import Annotated
 
@@ -16,7 +16,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], a
 AuctionId = Annotated[str, Query(description="Auction id, see /api/meta")]
 Prep = Annotated[int, Query(ge=0, le=240, description="Minutes before gate closure the decision is made")]
 Confidence = Annotated[float, Query(ge=0.5, le=0.99, description="One-sided confidence for the reliable-wind band")]
-Adjust = Annotated[bool, Query(description="Apply trailing bias correction to the forecast")]
+Adjust = Annotated[bool, Query(description="Use the pilot's corrected forecast instead of the official one")]
 
 
 def _auction(auction_id: str) -> config.Auction:
@@ -47,9 +47,9 @@ def _decisions(auction_id: str, prep: int, adjust: bool, confidence: float) -> p
         config.HISTORY_START, config.DELIVERY_END,
     )
     if adjust:
-        dec = analytics.bias_adjust(dec, config.BIAS_WINDOW_DAYS)
+        dec = analytics.scale_adjust(dec, config.CORRECTION_WINDOW_DAYS)
     else:
-        dec = dec.assign(raw_forecast=dec["forecast"], correction=0.0)
+        dec = dec.assign(raw_forecast=dec["forecast"], corr_slope=1.0, corr_intercept=0.0, correction=0.0)
     return analytics.add_reliability_band(dec, confidence, config.BAND_WINDOW_DAYS)
 
 
@@ -93,7 +93,7 @@ def day_view(
     auction: AuctionId = config.DEFAULT_AUCTION,
     prep: Prep = config.DEFAULT_PREP_MINUTES,
     confidence: Confidence = 0.9,
-    adjust: Adjust = True,
+    adjust: Adjust = False,
 ) -> dict:
     """Everything the desk sees for one delivery day: the forecast it would have used,
     a reliable-wind band from past errors, actual outturn and how the forecast evolved."""
@@ -138,7 +138,11 @@ def day_view(
         "decision_time": _iso(cutoff),
         "forecast_publish_time": _iso(used_pub),
         "horizon_h": {"min": float(rows["horizon_h"].min()), "max": float(rows["horizon_h"].max())},
-        "correction_mw": float(rows["correction"].iloc[0]),
+        "correction": {
+            "mean_mw": float(rows["correction"].mean()),
+            "slope": float(rows["corr_slope"].iloc[0]),
+            "intercept_mw": float(rows["corr_intercept"].iloc[0]),
+        },
         "buffer_mw": num(rows["q_hi"].iloc[0]),
         "series": [
             {"t": _iso(r.target_time), "raw_forecast": r.raw_forecast, "forecast": r.forecast,
@@ -172,7 +176,7 @@ def accuracy(
     auction: AuctionId = config.DEFAULT_AUCTION,
     prep: Prep = config.DEFAULT_PREP_MINUTES,
     confidence: Confidence = 0.9,
-    adjust: Adjust = True,
+    adjust: Adjust = False,
     start: date | None = None,
     end: date | None = None,
 ) -> dict:
@@ -214,7 +218,7 @@ def compare(
     start: date | None = None,
     end: date | None = None,
 ) -> dict:
-    """Each auction's decision-time forecast, official vs bias-adjusted, side by side."""
+    """Each auction's decision-time forecast, official vs corrected, side by side."""
     out = []
     for auc in config.AUCTIONS.values():
         for adjust in (False, True):
@@ -229,3 +233,35 @@ def compare(
                 "coverage": analytics.band_coverage(d),
             })
     return {"confidence": confidence, "rows": out}
+
+
+@app.get("/api/insight")
+def insight(auction: AuctionId = config.DEFAULT_AUCTION, prep: Prep = config.DEFAULT_PREP_MINUTES) -> dict:
+    """Pilot insight: where the official forecast goes wrong, and what a simple correction would gain.
+
+    The correction method was chosen on the days before ``VALIDATION_SPLIT`` and
+    is scored separately on the days after it, which the choice never saw.
+    """
+    auc = _auction(auction)
+    official = _period(_decisions(auc.id, prep, False, 0.9), None, None).dropna(subset=["actual"])
+    corrected = _period(_decisions(auc.id, prep, True, 0.9), None, None).dropna(subset=["actual"])
+
+    def halves(d: pd.DataFrame) -> dict:
+        before = d[d["delivery_day"] < config.VALIDATION_SPLIT]
+        after = d[d["delivery_day"] >= config.VALIDATION_SPLIT]
+        return {"all": analytics.error_metrics(d), "selection": analytics.error_metrics(before),
+                "test": analytics.error_metrics(after)}
+
+    return {
+        "auction": auc.id,
+        "window_days": config.CORRECTION_WINDOW_DAYS,
+        "split": {"selection": [config.DELIVERY_START.isoformat(), (config.VALIDATION_SPLIT - timedelta(days=1)).isoformat()],
+                  "test": [config.VALIDATION_SPLIT.isoformat(), config.DELIVERY_END.isoformat()]},
+        "by_level": analytics.level_stats(official, config.LEVEL_EDGES_MW),
+        "official": halves(official),
+        "corrected": halves(corrected),
+        "typical_fit": {
+            "slope": float(corrected.groupby("delivery_day")["corr_slope"].first().median()),
+            "intercept_mw": float(corrected.groupby("delivery_day")["corr_intercept"].first().median()),
+        },
+    }

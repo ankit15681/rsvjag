@@ -85,8 +85,12 @@ function Briefing({ day, confidencePct, auction, showActual, setShowActual, show
           <strong>{fmtTime(day.decision_time)}</strong>, the newest wind forecast was published at{' '}
           <strong>{fmtStamp(day.forecast_publish_time)}</strong>, looking {fmtHours(day.horizon_h.min)} to{' '}
           {fmtHours(day.horizon_h.max)} ahead.
-          {day.adjusted && Math.abs(day.correction_mw) > 1 && (
-            <> It is lowered by <strong>{fmtMW(day.correction_mw)}</strong> to remove the bias seen over the past week.</>
+          {day.adjusted && (
+            <>
+              {' '}Pilot insight is on: the forecast is rescaled using the last 14 days, actual ≈{' '}
+              {fmtGW(day.correction.intercept_mw)} + {day.correction.slope.toFixed(2)} × forecast, which lowers it by{' '}
+              <strong>{fmtMW(day.correction.mean_mw)}</strong> on average for this day.
+            </>
           )}
         </p>
       </div>
@@ -148,7 +152,7 @@ function Briefing({ day, confidencePct, auction, showActual, setShowActual, show
         </div>
         <DayChart day={day} showActual={showActual} showRuns={showRuns} focused={focused} />
         <div className="keys">
-          <span className="key"><i className="swatch" style={{ borderColor: 'var(--wind)' }} />Forecast used{day.adjusted ? ' (bias-corrected)' : ''}</span>
+          <span className="key"><i className="swatch" style={{ borderColor: 'var(--wind)' }} />Forecast used{day.adjusted ? ' (corrected)' : ''}</span>
           {day.adjusted && <span className="key"><i className="swatch dash" style={{ borderColor: 'var(--wind-pale)' }} />Official forecast</span>}
           <span className="key"><i className="swatch" style={{ borderColor: 'var(--signal)' }} />Reliable at {confidencePct}%</span>
           <span className="key"><i className="swatch area" style={{ background: 'var(--wind-wash)' }} />Likely range</span>
@@ -178,7 +182,7 @@ function Briefing({ day, confidencePct, auction, showActual, setShowActual, show
                 Waiting longer would {later.metrics.mae < day.official_metrics.mae ? 'have helped' : 'not have helped'}: the
                 official forecast at decision time missed by <strong>{fmtMW(day.official_metrics.mae)}</strong> on average,
                 the last one before delivery ({fmtStamp(later.publish_time)}) by <strong>{fmtMW(later.metrics.mae)}</strong>.
-                {day.adjusted && <> Bias correction brought the decision-time error to <strong>{fmtMW(day.metrics.mae)}</strong>.</>}
+                {day.adjusted && <> The pilot's corrected forecast missed by <strong>{fmtMW(day.metrics.mae)}</strong>.</>}
               </p>
             )}
             <p>

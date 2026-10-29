@@ -75,28 +75,57 @@ def daily_decisions(errors: dict[date, float]) -> pd.DataFrame:
     ])
 
 
-class TestNoLookAhead:
-    def test_bias_correction_only_uses_days_up_to_d_minus_2(self):
-        dec = daily_decisions({
-            date(2026, 1, 1): 100.0,
-            date(2026, 1, 2): 300.0,
-            date(2026, 1, 3): 5_000.0,  # D-1 for Jan 4: not fully known at decision time
-            date(2026, 1, 4): 9_999.0,
-        })
-        out = analytics.bias_adjust(dec, window_days=7).set_index("delivery_day")
-        assert out.loc[date(2026, 1, 4), "correction"] == pytest.approx(200.0)
-        assert out.loc[date(2026, 1, 1), "correction"] == 0.0  # no history yet
+def hourly_decisions(days: dict[date, list[tuple[float, float]]]) -> pd.DataFrame:
+    """Decision rows from (forecast, actual) pairs per delivery day."""
+    return pd.DataFrame([
+        {"delivery_day": d, "target_time": ts(f"{d}T{h:02d}:00"), "forecast": f, "actual": a, "error": f - a}
+        for d, pairs in days.items()
+        for h, (f, a) in enumerate(pairs)
+    ])
 
-    def test_bias_correction_respects_window(self):
-        dec = daily_decisions({date(2026, 1, d): float(d) for d in range(1, 11)})
-        out = analytics.bias_adjust(dec, window_days=2).set_index("delivery_day")
-        # Jan 10 uses Jan 7 and Jan 8 only.
-        assert out.loc[date(2026, 1, 10), "correction"] == pytest.approx(7.5)
+
+class TestNoLookAhead:
+    def test_scale_correction_fits_line_on_known_history(self):
+        # History follows actual = 1000 + 0.5 * forecast exactly.
+        history = {date(2026, 1, d): [(f, 1000 + 0.5 * f) for f in (2000.0, 8000.0, 14000.0)] for d in (1, 2)}
+        out = analytics.scale_adjust(hourly_decisions(history | {date(2026, 1, 4): [(10000.0, 0.0)]}), 7, min_hours=6)
+        row = out[out["delivery_day"] == date(2026, 1, 4)].iloc[0]
+        assert row["corr_slope"] == pytest.approx(0.5)
+        assert row["corr_intercept"] == pytest.approx(1000)
+        assert row["forecast"] == pytest.approx(6000)
+        assert row["raw_forecast"] == 10000
+        assert row["correction"] == pytest.approx(4000)
+
+    def test_scale_correction_ignores_d_minus_1_and_later(self):
+        clean = [(f, 1000 + 0.5 * f) for f in (2000.0, 8000.0, 14000.0)]
+        wild = [(f, 0.0) for f in (2000.0, 8000.0, 14000.0)]  # would wreck the fit if used
+        days = {date(2026, 1, 1): clean, date(2026, 1, 2): clean, date(2026, 1, 3): wild, date(2026, 1, 4): [(10000.0, 0.0)], date(2026, 1, 5): wild}
+        out = analytics.scale_adjust(hourly_decisions(days), 7, min_hours=6)
+        assert out[out["delivery_day"] == date(2026, 1, 4)].iloc[0]["forecast"] == pytest.approx(6000)
+
+    def test_scale_correction_needs_enough_history(self):
+        out = analytics.scale_adjust(hourly_decisions({date(2026, 1, 1): [(5000.0, 4000.0)], date(2026, 1, 3): [(5000.0, 0.0)]}), 7)
+        assert (out["forecast"] == out["raw_forecast"]).all()
+        assert (out["corr_slope"] == 1.0).all()
+
+    def test_scale_correction_never_goes_negative(self):
+        history = {date(2026, 1, d): [(f, max(0.0, f - 9000)) for f in (10000.0, 15000.0, 20000.0)] for d in (1, 2)}
+        out = analytics.scale_adjust(hourly_decisions(history | {date(2026, 1, 4): [(1000.0, 0.0)]}), 7, min_hours=6)
+        assert out[out["delivery_day"] == date(2026, 1, 4)].iloc[0]["forecast"] == 0
 
     def test_band_ignores_the_day_itself(self):
         dec = daily_decisions({date(2026, 1, d): 0.0 for d in range(1, 10)} | {date(2026, 1, 10): 50_000.0})
         out = analytics.add_reliability_band(dec, 0.9, window_days=14).set_index("delivery_day")
         assert out.loc[date(2026, 1, 10), "q_hi"] == 0.0
+
+
+class TestLevelStats:
+    def test_groups_by_forecast_level(self):
+        dec = hourly_decisions({date(2026, 1, 1): [(3000.0, 2000.0), (4000.0, 4000.0), (12000.0, 9000.0)]})
+        levels = analytics.level_stats(dec, [0, 5000, 10000, 15000])
+        assert [(lv["from"], lv["n"]) for lv in levels] == [(0, 2), (10000, 1)]
+        assert levels[0]["bias"] == pytest.approx(500)
+        assert levels[1]["bias"] == pytest.approx(3000)
 
 
 class TestMetrics:

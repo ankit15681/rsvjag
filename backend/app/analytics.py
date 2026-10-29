@@ -74,28 +74,42 @@ def decision_forecasts(
     return df[cols].sort_values("target_time").reset_index(drop=True)
 
 
-def _known_history(daily: pd.Series, day: date, window_days: int) -> pd.Series:
-    """Values for delivery days whose full outturn was known when deciding for ``day``.
+def _known_history(dec: pd.DataFrame, day: date, window_days: int) -> pd.DataFrame:
+    """Rows for delivery days whose full outturn was known when deciding for ``day``.
 
     The decision for D is made on the morning of D-1, so D-2 is the latest
     complete day of outturn.
     """
     last = day - timedelta(days=2)
-    return daily[(daily.index <= last) & (daily.index > last - timedelta(days=window_days))]
+    rows = dec[(dec["delivery_day"] <= last) & (dec["delivery_day"] > last - timedelta(days=window_days))]
+    return rows.dropna(subset=["actual"])
 
 
-def bias_adjust(dec: pd.DataFrame, window_days: int) -> pd.DataFrame:
-    """Subtract each day's trailing mean error (from known history) from the forecast.
+def scale_adjust(dec: pd.DataFrame, window_days: int, min_hours: int = 48) -> pd.DataFrame:
+    """Correct each day's forecast with a straight line fitted on known history.
 
-    Adds ``raw_forecast`` and ``correction`` columns; ``forecast``/``error`` become adjusted.
-    Days without enough history get no correction.
+    For delivery day D, fits ``actual = intercept + slope * forecast`` on the
+    previous ``window_days`` of known outturn and applies it to D's forecast.
+    A slope below 1 captures the forecast overshooting more on windy days.
+    Days with fewer than ``min_hours`` of history are left uncorrected.
+
+    Adds ``raw_forecast``, ``corr_slope``, ``corr_intercept`` and ``correction``
+    (raw minus corrected); ``forecast``/``error`` become corrected.
     """
-    daily_err = dec.groupby("delivery_day")["error"].mean().dropna()
-    corr = {d: _known_history(daily_err, d, window_days).mean() for d in dec["delivery_day"].unique()}
+    fits = {}
+    for day in dec["delivery_day"].unique():
+        hist = _known_history(dec, day, window_days)
+        if len(hist) >= min_hours and hist["forecast"].std() > 0:
+            slope, intercept = np.polyfit(hist["forecast"], hist["actual"], 1)
+            fits[day] = (float(slope), float(intercept))
+        else:
+            fits[day] = (1.0, 0.0)
     out = dec.copy()
     out["raw_forecast"] = out["forecast"]
-    out["correction"] = out["delivery_day"].map(corr).fillna(0.0)
-    out["forecast"] = out["raw_forecast"] - out["correction"]
+    out["corr_slope"] = out["delivery_day"].map(lambda k: fits[k][0])
+    out["corr_intercept"] = out["delivery_day"].map(lambda k: fits[k][1])
+    out["forecast"] = (out["corr_intercept"] + out["corr_slope"] * out["raw_forecast"]).clip(lower=0)
+    out["correction"] = out["raw_forecast"] - out["forecast"]
     out["error"] = out["forecast"] - out["actual"]
     return out
 
@@ -106,12 +120,10 @@ def add_reliability_band(dec: pd.DataFrame, confidence: float, window_days: int)
     ``reliable`` = forecast - q(confidence): wind output expected to be exceeded
     with probability ``confidence``. The gap to the forecast is the shortfall buffer.
     """
-    d = dec.dropna(subset=["error"])
-    by_day = {k: g["error"] for k, g in d.groupby("delivery_day")}
     q = {}
     for day in dec["delivery_day"].unique():
-        hist = [e for k, e in by_day.items() if day - timedelta(days=2 + window_days) < k <= day - timedelta(days=2)]
-        q[day] = error_quantiles(pd.concat(hist), confidence) if hist else (np.nan, np.nan)
+        hist = _known_history(dec, day, window_days)
+        q[day] = error_quantiles(hist["error"], confidence) if len(hist) else (np.nan, np.nan)
     out = dec.copy()
     out["q_lo"] = out["delivery_day"].map(lambda k: q[k][0])
     out["q_hi"] = out["delivery_day"].map(lambda k: q[k][1])
@@ -196,6 +208,18 @@ def daily_stats(dec: pd.DataFrame) -> list[dict]:
     energy = d.groupby("delivery_day")[["forecast", "actual"]].sum() / 1000  # hourly MW -> GWh
     out = stats.join(energy.rename(columns={"forecast": "forecast_gwh", "actual": "actual_gwh"}))
     return [{"day": k.isoformat(), **_clean(v)} for k, v in out.to_dict("index").items()]
+
+
+def level_stats(dec: pd.DataFrame, edges_mw: list[int]) -> list[dict]:
+    """Error statistics grouped by forecast wind level (MW bins)."""
+    d = dec.dropna(subset=["error"])
+    level = pd.cut(d["forecast"], bins=edges_mw, right=False)
+    stats = _grouped_stats(d.assign(level=level), "level")
+    return [
+        {"from": int(k.left), "to": int(k.right), **_clean(v)}
+        for k, v in stats.to_dict("index").items()
+        if v["n"] > 0
+    ]
 
 
 def hour_of_day_stats(dec: pd.DataFrame) -> list[dict]:

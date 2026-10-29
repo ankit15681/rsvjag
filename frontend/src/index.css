@@ -169,6 +169,10 @@ table.compare { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .compare td .best { color: var(--wind); font-weight: 600; }
 .table-wrap { overflow-x: auto; }
 
+section.insight { margin-top: 20px; box-shadow: inset 3px 0 0 var(--signal); }
+section.insight .two-col { margin-top: 14px; align-items: start; }
+section.insight .compare th { white-space: normal; vertical-align: bottom; }
+
 details.method { margin-top: 20px; }
 details.method summary { cursor: pointer; font-weight: 600; }
 details.method ul { margin: 10px 0 0; padding-left: 18px; color: var(--ink); max-width: 90ch; }

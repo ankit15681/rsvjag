@@ -47,9 +47,12 @@ export function SettingsBar({ auctions, value, onChange }: Props) {
         </div>
       </div>
 
-      <label className="switch" title="Subtract the average forecast error of the last 7 days with known outturn">
+      <label
+        className="switch"
+        title="Goes beyond the official forecast: rescales it with a line fitted on the last 14 days of known outturn"
+      >
         <input type="checkbox" checked={value.adjust} onChange={(e) => set({ adjust: e.target.checked })} />
-        Correct for recent forecast bias
+        Pilot insight: show corrected forecast
       </label>
     </section>
   )

@@ -19,13 +19,20 @@ DECISION_END = date(2026, 1, 31)
 DELIVERY_START = date(2026, 1, 2)
 DELIVERY_END = date(2026, 2, 1)
 
-# Trailing statistics (bias correction, uncertainty band) only use outturn that
-# was known at decision time, so the snapshot includes a warm-up period of
+# Trailing statistics (forecast correction, uncertainty band) only use outturn
+# that was known at decision time, so the snapshot includes a warm-up period of
 # history before the first delivery day.
 WARMUP_DAYS = 14
-BIAS_WINDOW_DAYS = 7
+CORRECTION_WINDOW_DAYS = 14
 BAND_WINDOW_DAYS = 14
 HISTORY_START = DELIVERY_START - timedelta(days=WARMUP_DAYS)
+
+# The correction method and window were chosen on deliveries before this date
+# and are reported separately on the days from it onwards, which the choice never saw.
+VALIDATION_SPLIT = date(2026, 1, 17)
+
+# Forecast wind levels (MW) for the "error by wind level" breakdown.
+LEVEL_EDGES_MW = [0, 5000, 10000, 15000, 20000, 30000]
 
 
 @dataclass(frozen=True)
